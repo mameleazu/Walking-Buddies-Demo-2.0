@@ -1,2 +1,1 @@
-# Walking-Buddies-Demo-2.0
-Walking Buddies
+Walking Buddies Innovate package
