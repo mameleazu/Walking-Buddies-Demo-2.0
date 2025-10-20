@@ -1,6 +1,5 @@
-
 # -*- coding: utf-8 -*-
-import random, time, io, os
+import os, io, random, time
 from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional
 import pandas as pd
@@ -9,33 +8,21 @@ import streamlit as st
 APP_NAME = "Walking Buddies"
 st.set_page_config(page_title=APP_NAME, page_icon="👟", layout="wide")
 
+# ---- state ----
 def _ensure_state():
     ss = st.session_state
-    ss.setdefault("users", {})
-    ss.setdefault("teams", {})
-    ss.setdefault("invites", [])
-    ss.setdefault("routes", [])
-    ss.setdefault("messages", [])
-    ss.setdefault("photos", [])
-    ss.setdefault("reminders", {"walk_enabled": True, "walk_every_min": 120, "stand_enabled": True, "stand_every_min": 30, "next_walk_at": None, "next_stand_at": None, "snooze_minutes": 10})
+    ss.setdefault("users", {}); ss.setdefault("teams", {}); ss.setdefault("invites", [])
+    ss.setdefault("routes", []); ss.setdefault("messages", []); ss.setdefault("photos", [])
+    ss.setdefault("reminders", {"walk_enabled": True,"walk_every_min": 120,"stand_enabled": True,"stand_every_min": 30,"next_walk_at": None,"next_stand_at": None,"snooze_minutes": 10})
     ss.setdefault("group_walk_rooms", {})
-    ss.setdefault("quests", [
-        {"id":"q_mindful_park","name":"Mindful Park Loop","minutes":15,"desc":"Mindful loop with breathing.","reward_points":50},
-        {"id":"q_history_trail","name":"History Trail","minutes":25,"desc":"Fun facts every 5 minutes.","reward_points":80},
-        {"id":"q_sunrise","name":"Sunrise Reset","minutes":10,"desc":"Gratitude prompts.","reward_points":40},
-    ])
     ss.setdefault("challenge_catalog", [
         {"id":"daily_5000","name":"Daily Step Goal","desc":"Hit 5,000 steps today","type":"daily_steps","target":5000,"period":"daily","reward_points":50},
         {"id":"weekend_walkathon","name":"Weekend Walkathon","desc":"Walk 10 miles Sat–Sun","type":"distance_period","target_miles":10.0,"period":"weekend","reward_points":150},
         {"id":"photo_share","name":"Photo Challenge","desc":"Share a scenic walk photo this week","type":"boolean_weekly","target":1,"period":"weekly","reward_points":20},
         {"id":"invite_3","name":"Invite Challenge","desc":"Invite 3 friends this month","type":"count_monthly","target":3,"period":"monthly","reward_points":100},
         {"id":"team_100_miles","name":"Team Mileage Goal","desc":"Teams aim for 100 miles combined this week","type":"team_distance_weekly","target_miles":100.0,"period":"weekly","reward_points":300},
-        {"id":"relay_pass_baton","name":"Relay Challenge","desc":"Each member walks 2 miles this week","type":"team_each_member_distance_weekly","target_miles":2.0,"period":"weekly","reward_points":200},
-        {"id":"city_explorer","name":"City Explorer","desc":"Walk 5 distinct neighborhoods this month","type":"distinct_routes_monthly","target_count":5,"period":"monthly","reward_points":120},
     ])
-    ss.setdefault("custom_challenges", [])
-    ss.setdefault("user_challenges", {})
-    ss.setdefault("team_battles", [])
+    ss.setdefault("custom_challenges", []); ss.setdefault("user_challenges", {})
     ss.setdefault("reward_catalog", [
         {"id":"badge_10_walks","type":"badge","name":"First 10 Walks","cost":0,"desc":"Milestone badge after 10 walks"},
         {"id":"badge_100_miles","type":"badge","name":"100 Miles Club","cost":0,"desc":"Milestone badge after 100 miles"},
@@ -44,31 +31,30 @@ def _ensure_state():
         {"id":"giftcard","type":"gift","name":"Gift Card $20","cost":800,"desc":"Generic gift card"},
         {"id":"premium_challenge","type":"unlock","name":"Exclusive Challenge Pack","cost":400,"desc":"Unlock premium challenge set"},
     ])
-    ss.setdefault("badges", {})
-    ss.setdefault("donations", [])
-    ss.setdefault("collectibles", {})
+    ss.setdefault("badges", {}); ss.setdefault("donations", []); ss.setdefault("collectibles", {})
+    # timer
+    ss.setdefault("timer_running", False); ss.setdefault("timer_started_at", None); ss.setdefault("timer_accum_sec", 0)
 _ensure_state()
 
-POINT_RULES = {"base_per_minute":1, "streak_7":10, "streak_30":50, "group_walk_bonus":20, "invite_bonus":50, "photo_share":5}
-TIERS = [("Platinum",5000),("Gold",1000),("Silver",500),("Bronze",0)]
+POINT_RULES = {"base_per_minute":1,"streak_7":10,"streak_30":50,"group_walk_bonus":20,"invite_bonus":50,"photo_share":5}
+TIERS=[("Platinum",5000),("Gold",1000),("Silver",500),("Bronze",0)]
 
-def ensure_user(uid: str, display_name: Optional[str]=None)->Dict[str,Any]:
-    u = st.session_state.users.setdefault(uid, {
-        "name": display_name or uid, "points":0, "team":None, "company":"", "city":"", "available_times":"Mornings",
+def ensure_user(uid, name=None):
+    return st.session_state.users.setdefault(uid, {
+        "name": name or uid, "points":0, "team":None, "company":"", "city":"", "available_times":"Mornings",
         "buddies": set(), "walk_dates":[], "steps_log":{}, "minutes_log":{}, "distance_miles_log":{},
         "photos_this_week":0, "invites_this_month":0, "routes_completed_month": set(), "mood_log":{}, "avatar_level":1
     })
-    return u
 
-def calc_streak(ds: List[datetime])->int:
+def calc_streak(ds):
     if not ds: return 0
-    dates = sorted({d.date() for d in ds}, reverse=True); s=0; today=date.today()
+    dates=sorted({d.date() for d in ds}, reverse=True); s=0; today=date.today()
     for d in dates:
         if d == today - timedelta(days=s): s+=1
         elif d < today - timedelta(days=s): break
     return s
 
-def tier_for_points(p:int)->str:
+def tier_for_points(p):
     for name, th in TIERS:
         if p>=th: return name
     return "Bronze"
@@ -94,8 +80,6 @@ def award_walk(uid, minutes, steps, miles, is_group, shared_photo, mood=None):
     elif s>=7: gained+=POINT_RULES["streak_7"]
     u["points"]=int(u.get("points",0))+gained
     if mood: u["mood_log"][today]=mood
-    # collectibles
-    import random
     if random.random()<0.25:
         col=st.session_state.collectibles.setdefault(uid,{"coins":0,"items":set()})
         coin=random.randint(1,10); col["coins"]+=coin; st.toast(f"🪙 Found {coin} coins!")
@@ -116,7 +100,6 @@ def get_leaderboards():
     if not users_df.empty: users_df=users_df.sort_values("points",ascending=False).reset_index(drop=True)
     teams_df=pd.DataFrame([{"team":k,"points":v} for k,v in team_points.items()], columns=["team","points"])
     if not teams_df.empty: teams_df=teams_df.sort_values("points",ascending=False).reset_index(drop=True)
-    # cities weekly steps
     if not users_df.empty:
         cities=users_df["city"].dropna().unique()
         y,w,_=date.today().isocalendar(); monday=date.fromisocalendar(y,w,1)
@@ -131,7 +114,6 @@ def get_leaderboards():
             city_rows.append({"city":c,"steps_week":total})
     city_df=pd.DataFrame(city_rows)
     if not city_df.empty: city_df=city_df.sort_values("steps_week",ascending=False).reset_index(drop=True)
-    # company points
     if not users_df.empty:
         for co in users_df["company"].dropna().unique():
             if not co: continue
@@ -199,42 +181,68 @@ with tab_dash:
 
 with tab_log:
     st.subheader("Log a Walk")
-    colA,colB,colC=st.columns(3)
-    with colA: minutes=st.number_input("Minutes",1,300,30)
-    with colB: steps=st.number_input("Steps",0,100000,3500)
-    with colC: miles_in=st.number_input("Miles",0.0,100.0,1.5,format="%.2f")
-    is_group=st.checkbox("Group walk"); shared_photo=st.checkbox("Shared a scenic photo")
-    mood=st.selectbox("How do you feel now?", ["😀 Energized","🙂 Good","😐 Meh","😕 Tired","😔 Low"], index=1)
-    if st.button("Submit Walk"):
-        gained,total,streak=award_walk(user_id, minutes, steps, miles_in, is_group, shared_photo, mood)
-        st.success(f"+{gained} points! Total: {total} | Streak: {streak} day(s).")
-    st.divider()
-    st.subheader("Upload a Photo")
-    img=st.file_uploader("Add a photo from your walk (optional)", type=["png","jpg","jpeg"])
-    caption=st.text_input("Caption")
-    if st.button("Post Photo"):
-        if img is not None:
-            st.session_state.photos.append({"user_id": user_id, "caption": caption, "ts": datetime.now().isoformat(timespec="seconds"), "img_bytes": img.getvalue()})
-            st.success("Photo posted to the community feed!")
-        else:
-            st.warning("Select an image first.")
-    st.divider()
-    st.subheader("AR Collectible Scan")
-    if st.button("Scan"):
-        col=st.session_state.collectibles.setdefault(user_id,{"coins":0,"items":set()})
-        import random
-        if random.random()<0.15:
-            item=random.choice(["Leaf Token","Trail Gem","Sunburst"]); col["items"].add(item); st.success(f"✨ Rare collectible: {item}!")
-        else:
-            coin=random.randint(1,5); col["coins"]+=coin; st.info(f"🪙 You picked up {coin} coins.")
-    col=st.session_state.collectibles.get(user_id,{"coins":0,"items":set()})
-    st.caption(f"Coins: {col.get('coins',0)} | Items: {', '.join(col.get('items', set())) or 'None'}")
+    # Timer controls
+    st.markdown("#### ⏱️ Timer")
+    running = st.session_state.get("timer_running", False)
+    started_at = st.session_state.get("timer_started_at", None)
+    accum = int(st.session_state.get("timer_accum_sec", 0))
+    now=time.time()
+    elapsed = accum + (int(now - float(started_at)) if running and started_at else 0)
+    st.info(f"Elapsed: **{elapsed//60:02d}:{elapsed%60:02d}** (mm:ss)")
+    col_pt1, col_pt2 = st.columns(2)
+    with col_pt1:
+        spm = st.number_input("Steps/min (est.)", 20, 220, 100, 5, key="k_spm")
+    with col_pt2:
+        mpm = st.number_input("Miles/min (est.)", 0.01, 0.20, 0.05, 0.005, format="%.3f", key="k_mpm")
+    cta1, cta2, cta3, cta4 = st.columns(4)
+    with cta1:
+        if st.button("Start", disabled=running):
+            st.session_state.timer_running=True; st.session_state.timer_started_at=time.time(); st.session_state.timer_accum_sec=0; st.success("Timer started.")
+    with cta2:
+        if st.button("Pause", disabled=not running):
+            if running and started_at: st.session_state.timer_accum_sec = accum + int(time.time()-float(started_at))
+            st.session_state.timer_running=False; st.session_state.timer_started_at=None; st.info("Paused.")
+    with cta3:
+        if st.button("Resume", disabled=running or accum==0):
+            st.session_state.timer_running=True; st.session_state.timer_started_at=time.time(); st.success("Resumed.")
+    with cta4:
+        if st.button("Stop & Save", disabled=(not running and accum==0)):
+            total = accum + (int(time.time()-float(started_at)) if running and started_at else 0)
+            minutes_auto=max(1, total//60)
+            st.session_state["timer_prompt_open"]=True
+            st.session_state["timer_save_minutes"]=minutes_auto
+            st.session_state["timer_save_steps"]=int(minutes_auto*spm)
+            st.session_state["timer_save_miles"]=round(minutes_auto*mpm,2)
+            st.session_state.timer_running=False; st.session_state.timer_started_at=None; st.session_state.timer_accum_sec=0
+
+    if st.session_state.get("timer_prompt_open"):
+        st.warning("Save your timed walk:")
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1: m_c = st.number_input("Minutes", 1, 300, int(st.session_state.get("timer_save_minutes", 10)))
+        with tc2: s_c = st.number_input("Steps", 0, 200000, int(st.session_state.get("timer_save_steps", 1000)))
+        with tc3: mi_c = st.number_input("Miles", 0.0, 100.0, float(st.session_state.get("timer_save_miles", 0.5)), step=0.01, format="%.2f")
+        is_group_c = st.checkbox("Group walk", value=False, key="k_t_group")
+        photo_c = st.checkbox("Shared a scenic photo", value=False, key="k_t_photo")
+        mood_c = st.selectbox("How do you feel now?", ["😀 Energized","🙂 Good","😐 Meh","😕 Tired","😔 Low"], index=1, key="k_t_mood")
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Save Walk"):
+                g,t,streak = award_walk(user_id, int(m_c), int(s_c), float(mi_c), is_group_c, photo_c, mood_c)
+                st.success(f"Saved timed walk: +{g} points! Total: {t} | Streak: {streak} day(s)."); st.session_state["timer_prompt_open"]=False
+        with b2:
+            if st.button("Cancel"):
+                st.session_state["timer_prompt_open"]=False; st.info("Canceled.")
 
     st.divider()
-    st.subheader("Invite a Friend")
-    email=st.text_input("Friend's email")
-    if st.button("Send Invite"):
-        total=invite_friend(user_id, email); st.success(f"Invite sent! +{POINT_RULES['invite_bonus']} points. New total: {total}.")
+    st.markdown("#### Manual Entry")
+    colA,colB,colC=st.columns(3)
+    with colA: minutes=st.number_input("Minutes",1,300,30, key="k_m_min")
+    with colB: steps=st.number_input("Steps",0,100000,3500, key="k_m_steps")
+    with colC: miles_in=st.number_input("Miles",0.0,100.0,1.5,format="%.2f", key="k_m_miles")
+    is_group=st.checkbox("Group walk", key="k_m_group"); photo=st.checkbox("Shared a scenic photo", key="k_m_photo")
+    mood=st.selectbox("How do you feel now?", ["😀 Energized","🙂 Good","😐 Meh","😕 Tired","😔 Low"], index=1, key="k_m_mood")
+    if st.button("Submit Walk"):
+        g,t,streak=award_walk(user_id, minutes, steps, miles_in, is_group, photo, mood); st.success(f"+{g} points! Total: {t} | Streak: {streak} day(s).")
 
 with tab_leader:
     st.subheader("Leaderboards")
@@ -264,7 +272,6 @@ with tab_rewards:
     st.subheader("Rewards & Badges")
     u=ensure_user(user_id, display_name)
     st.metric("Points", int(u.get("points",0)))
-    st.write("Redeem partners: Sneaker $10, Cafe $5, Gift $20, Premium Pack. (Deducts points on click.)")
     for item in st.session_state.reward_catalog:
         can=int(u.get("points",0))>=int(item["cost"])
         if st.button(f"Redeem {item['name']} ({item['cost']} pts)", disabled=not can, key=f"redeem_{item['id']}"):
@@ -284,7 +291,10 @@ with tab_routes:
     user_routes=[r for r in st.session_state.routes if r["user_id"]==user_id]
     if user_routes:
         df=pd.DataFrame(user_routes); st.dataframe(df[["name","distance_km","notes","created_at"]], use_container_width=True)
+        del_name = st.selectbox("Delete a route", [""] + [r["name"] for r in user_routes])
+        if st.button("Delete Selected Route"):
+            if del_name: st.session_state.routes=[r for r in st.session_state.routes if not (r["user_id"]==user_id and r["name"]==del_name)]; st.success(f"Deleted route '{del_name}'.")
     else:
         st.info("No routes yet — add your first route above.")
 
-st.caption("Prototype uses local in-memory storage. For production, add DB persistence and auth.")
+st.caption("Offline demo. Add DB for persistence + auth in production.")
