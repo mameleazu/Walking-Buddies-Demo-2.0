@@ -18,7 +18,7 @@ def _ensure_state():
     ss.setdefault("invites", [])
     ss.setdefault("routes", [])
     ss.setdefault("messages", [])
-    ss.setdefault("photos", [])   # [{'user_id','miles','notes','ts'}]
+    ss.setdefault("photos", [])   # [{'user_id','miles','notes','ts','audience'}]
     ss.setdefault("reminders", {
         "walk_enabled": True, "walk_every_min": 120,
         "stand_enabled": True, "stand_every_min": 30,
@@ -49,12 +49,12 @@ def _ensure_state():
     ])
     ss.setdefault("badges", {})
     ss.setdefault("privacy_defaults", {
-        "profileVisibility": "private",
+        "profileVisibility": "private",  # private | friends | team | public
         "showCity": True,
         "showCompany": False,
         "leaderboards": {"public": False, "alias": "", "teamVisible": True},
         "discoverability": {"byCity": True, "byCompany": False},
-        "routes": {"defaultShare": "private"},
+        "routes": {"defaultShare": "private"},  # private | friends | team | public
         "photos": {"defaultAudience": "friends", "stripEXIF": True, "autoExpireDays": 365},
         "messaging": {"allowRequests": "friends_of_friends", "readReceipts": False, "blocked": []},
         "notifications": {"genericContent": True, "quietHours": "22:00-07:00"},
@@ -143,6 +143,20 @@ def check_and_award_badges(user_id: str):
     if total_walks(u) >= 10: b.add("badge_10_walks")
     if total_miles(u) >= 100.0: b.add("badge_100_miles")
     evolve_avatar(user_id)
+
+# Privacy helpers
+def is_friend(a,b)->bool:
+    ua = ensure_user(a, a); return b in ua.get("buddies", set())
+def same_team(a,b)->bool:
+    ua, ub = ensure_user(a, a), ensure_user(b, b)
+    return ua.get("team") and ua.get("team")==ub.get("team")
+def can_view_profile(owner_id: str, viewer_id: str)->bool:
+    if owner_id == viewer_id: return True
+    p = ensure_user(owner_id)["privacy"].get("profileVisibility","private")
+    if p == "public": return True
+    if p == "team": return same_team(owner_id, viewer_id)
+    if p == "friends": return is_friend(owner_id, viewer_id)
+    return False
 
 # =========================
 # Challenges Engine (Built-in + Personalized)
@@ -282,7 +296,9 @@ def award_walk(uid, minutes, steps, miles, calories, is_group, shared_photo, moo
     if shared_photo:
         gained+=POINT_RULES["photo_share"]
         u["photos_this_week"]=int(u.get("photos_this_week",0))+1
-        st.session_state.photos.append({"user_id": uid, "miles": miles, "notes": "Shared a scenic photo", "ts": datetime.now().isoformat(timespec="seconds")})
+        # apply photo audience from user's privacy default
+        audience = u.get("privacy",{}).get("photos",{}).get("defaultAudience","friends")
+        st.session_state.photos.append({"user_id": uid, "miles": miles, "notes": "Shared a scenic photo", "ts": datetime.now().isoformat(timespec="seconds"), "audience": audience})
     s=calc_streak(u["walk_dates"])
     if s>=30: gained+=POINT_RULES["streak_30"]
     elif s>=7: gained+=POINT_RULES["streak_7"]
@@ -301,16 +317,32 @@ def add_route(uid, name, distance_km, notes, audience):
     u = ensure_user(uid, uid); u["routes_completed_month"].add(name)
 
 def list_routes(uid): return [r for r in st.session_state.routes if r["user_id"] == uid]
-def delete_route(uid, name): st.session_state.routes = [r for r in st.session_state.routes if not (r["user_id"]==uid and r["name"]==name)]
+def delete_route(uid, name): st.session_state.routes = [r for r in st.session_state.routes if not (r{"{"}"user_id"{":"}==uid and r{"{"}"name"{":"}==name)]  # noqa
 
 def send_message(sender_id, recipient_id, text):
+    # Respect messaging privacy: block list + who can message
+    recip = ensure_user(recipient_id)
+    msg_policy = recip.get("privacy",{}).get("messaging",{"allowRequests":"friends_of_friends","blocked":[]})
+    if sender_id in msg_policy.get("blocked",[]):
+        st.error("You can't message this user."); return
+    allow = msg_policy.get("allowRequests","friends_of_friends")
+    ok = False
+    if allow == "anyone": ok = True
+    elif allow == "friends_of_friends":
+        # simple check: friend or shares any buddy in common
+        su = ensure_user(sender_id); ok = (recipient_id in su.get("buddies", set())) or (len(su.get("buddies", set()).intersection(ensure_user(recipient_id).get("buddies", set())))>0)
+    elif allow == "friends_only":
+        ok = sender_id in ensure_user(recipient_id).get("buddies", set())
+    if not ok:
+        st.warning("Message request not allowed by recipient's privacy settings."); return
     st.session_state.messages.append({"from": sender_id, "to": recipient_id, "text": text, "ts": datetime.now().isoformat(timespec="seconds")})
+
 def get_conversation(a,b):
     msgs = [m for m in st.session_state.messages if (m["from"]==a and m["to"]==b) or (m["from"]==b and m["to"]==a)]
     msgs.sort(key=lambda x: x["ts"]); return msgs
 
 # =========================
-# Leaderboards
+# Leaderboards (privacy-aware)
 # =========================
 def leaderboard_display_name(u: Dict[str,Any])->str:
     lb = u.get("privacy",{}).get("leaderboards", {})
@@ -324,6 +356,11 @@ def leaderboard_display_name(u: Dict[str,Any])->str:
 def get_leaderboards(viewer_id: str):
     users=st.session_state.users; rows=[]; team_points={}
     for uid,u in users.items():
+        lb = u.get("privacy",{}).get("leaderboards", {"public": False, "teamVisible": True})
+        include_public = bool(lb.get("public", False))
+        same_team_ok = same_team(uid, viewer_id) and bool(lb.get("teamVisible", True))
+        if not (include_public or same_team_ok or uid==viewer_id):
+            continue
         display = leaderboard_display_name(u)
         rows.append({"user":display,"points":int(u.get("points",0)),"team":u.get("team") or ""})
         if u.get("team"): team_points[u["team"]] = team_points.get(u["team"],0) + int(u.get("points",0))
@@ -337,6 +374,11 @@ def get_leaderboards(viewer_id: str):
     for tname, tinfo in st.session_state.teams.items():
         for member in sorted(list(tinfo.get("members", set()))):
             u = ensure_user(member, member)
+            lb = u.get("privacy",{}).get("leaderboards", {"public": False, "teamVisible": True})
+            include_public = bool(lb.get("public", False))
+            same_team_ok = same_team(member, viewer_id) and bool(lb.get("teamVisible", True))
+            if not (include_public or same_team_ok or member==viewer_id):
+                continue
             role = tinfo.get("roles", {}).get(member, "Player")
             team_member_rows.append({"team": tname, "user": leaderboard_display_name(u), "points": int(u.get("points",0)), "role": role})
     team_members_df = pd.DataFrame(team_member_rows, columns=["team","user","points","role"])
@@ -373,7 +415,6 @@ def compute_battle_score(battle: Dict[str,Any])->Dict[str,Any]:
     return {"home_miles": home_m, "away_miles": away_m, "winner": winner}
 
 def award_battle_points(battle: Dict[str,Any]):
-    # Award points once when battle closes and winner not yet recorded
     if battle.get("winner_awarded"): return
     res = compute_battle_score(battle)
     winner = res["winner"]
@@ -468,8 +509,8 @@ if st.sidebar.button("Apply & Reset Timers"):
 # Main UI Tabs
 # =========================
 st.title("👟 Walking Buddies — Social Walking for Healthier Lifestyles")
-tab_dash, tab_log, tab_leader, tab_challenges, tab_community, tab_rewards, tab_routes, tab_messages = st.tabs(
-    ["Dashboard","Log Walk","Leaderboards","Challenges","Community","Rewards","Routes","Messages"]
+tab_dash, tab_log, tab_leader, tab_challenges, tab_community, tab_rewards, tab_routes, tab_messages, tab_privacy = st.tabs(
+    ["Dashboard","Log Walk","Leaderboards","Challenges","Community","Rewards","Routes","Messages","Privacy"]
 )
 
 # Dashboard
@@ -644,7 +685,7 @@ with tab_community:
     st.subheader("Community")
     subtab1, subtab2, subtab3 = st.tabs(["Find Local Buddies","Team Battles","Photo Feed"])
 
-    # Find Local Buddies
+    # Find Local Buddies (privacy-aware)
     with subtab1:
         st.markdown("### Find Local Buddies")
         u = ensure_user(user_id, display_name)
@@ -656,6 +697,8 @@ with tab_community:
         results = []
         for uid, uu in st.session_state.users.items():
             if uid == user_id: continue
+            if not uu.get("privacy",{}).get("discoverability",{}).get("byCity", True): continue
+            if not can_view_profile(uid, user_id): continue
             if city_filter and city_filter.lower() not in (uu.get("city","").lower()):
                 continue
             if time_filter != "Any" and time_filter != uu.get("available_times","Any"):
@@ -663,14 +706,18 @@ with tab_community:
             results.append((uid, uu))
         if results:
             for uid, uu in results:
-                cols = st.columns(4)
+                cols = st.columns(5)
                 cols[0].write(f"**{uu.get('name', uid)}**")
-                cols[1].write(uu.get("city",""))
+                if uu.get("privacy",{}).get("showCity", True):
+                    cols[1].write(uu.get("city",""))
+                else:
+                    cols[1].write("—")
                 cols[2].write(uu.get("available_times",""))
                 if cols[3].button("Add Buddy", key=f"addbuddy_{uid}"):
                     me = ensure_user(user_id, display_name)
                     me["buddies"].add(uid); ensure_user(uid)["buddies"].add(user_id)
                     st.success(f"Added {uu.get('name', uid)} as a buddy!")
+                cols[4].write(uu.get("company","") if uu.get("privacy",{}).get("showCompany", False) else " ")
         else:
             st.info("No matches yet. Try broadening your filters.")
 
@@ -714,18 +761,32 @@ with tab_community:
                     if st.button(f"Award Winner Points (#{i})"):
                         award_battle_points(b); st.success("Winner points awarded!")
 
-    # Photo Feed
+    # Photo Feed (privacy-aware)
     with subtab3:
         st.markdown("### Recent Scenic Walks")
-        photos = list(reversed(st.session_state.photos[-20:]))
-        if photos:
-            for ph in photos:
-                u = ensure_user(ph["user_id"])
-                st.write(f"**{u.get('name', ph['user_id'])}** · {ph['ts']} · {ph.get('miles',0)} miles")
+        feed = []
+        for ph in reversed(st.session_state.photos[-50:]):
+            owner = ph["user_id"]
+            audience = ph.get("audience","friends")
+            can = False
+            if audience == "public":
+                can = True
+            elif audience == "friends":
+                can = is_friend(owner, user_id) or owner==user_id
+            elif audience == "team":
+                can = same_team(owner, user_id) or owner==user_id
+            elif audience == "private":
+                can = owner==user_id
+            if can:
+                feed.append(ph)
+        if feed:
+            for ph in feed:
+                uo = ensure_user(ph["user_id"])
+                st.write(f"**{uo.get('name', ph['user_id'])}** · {ph['ts']} · {ph.get('miles',0)} miles · ({ph.get('audience','friends')})")
                 st.caption(ph.get("notes",""))
                 st.divider()
         else:
-            st.info("No photo posts yet — log a walk and tick 'Shared a scenic photo'.")
+            st.info("No visible photo posts yet — log a walk and tick 'Shared a scenic photo'.")
 
 # Rewards
 with tab_rewards:
@@ -754,7 +815,9 @@ with tab_routes:
         route_name = st.text_input("Route name")
         route_km = st.number_input("Distance (km)", 0.1, 200.0, 3.0, step=0.1, format="%.1f")
         route_notes = st.text_area("Notes (optional)", height=80)
-        audience = st.selectbox("Share with", ["private","friends","team","public"], index=0)
+        # default audience from privacy
+        default_aud = ensure_user(user_id).get("privacy",{}).get("routes",{}).get("defaultShare","private")
+        audience = st.selectbox("Share with", ["private","friends","team","public"], index=["private","friends","team","public"].index(default_aud))
     with rc2:
         if st.button("Add Route"):
             if route_name.strip(): add_route(user_id, route_name.strip(), route_km, route_notes.strip(), audience); st.success(f"Route '{route_name}' added.")
@@ -769,13 +832,16 @@ with tab_routes:
     else:
         st.info("No routes yet — add your first route above.")
 
-# Messages (uses buddies added via Community)
+# Messages (uses buddies added via Community) with privacy checks in send_message
 with tab_messages:
     st.subheader("Messages")
     u = ensure_user(user_id, display_name)
     buddy_choices = sorted(list(u.get("buddies", set())))
     buddy = st.selectbox("Select a buddy", [""] + buddy_choices, index=0)
     if buddy:
+        # respect profile visibility for conversation view
+        if not can_view_profile(buddy, user_id):
+            st.warning("This user's profile is not visible to you.")
         msgs = get_conversation(user_id, buddy)
         for m in msgs:
             who = "You" if m["from"] == user_id else st.session_state.users.get(m["from"],{}).get("name", m["from"])
@@ -785,3 +851,54 @@ with tab_messages:
             if new_msg.strip(): send_message(user_id, buddy, new_msg.strip()); st.experimental_rerun()
     else:
         st.info("Add buddies from the Community tab to start messaging.")
+
+# Privacy Center
+with tab_privacy:
+    st.subheader("Privacy Center")
+    u = ensure_user(user_id, display_name)
+    p = u["privacy"]
+    st.markdown("### Profile visibility")
+    p["profileVisibility"] = st.selectbox("Who can see your profile?", ["private","friends","team","public"], index=["private","friends","team","public"].index(p.get("profileVisibility","private")))
+    c1,c2 = st.columns(2)
+    with c1: p["showCity"] = st.checkbox("Show my city", value=bool(p.get("showCity", True)))
+    with c2: p["showCompany"] = st.checkbox("Show my company", value=bool(p.get("showCompany", False)))
+    st.markdown("---")
+    st.markdown("### Leaderboards")
+    lb = p.get("leaderboards", {"public": False, "alias": "", "teamVisible": True})
+    lb["public"] = st.checkbox("Appear on public leaderboards", value=bool(lb.get("public", False)))
+    lb["teamVisible"] = st.checkbox("Show me on my team's leaderboard", value=bool(lb.get("teamVisible", True)))
+    lb["alias"] = st.text_input("Leaderboard alias (optional)", value=lb.get("alias",""))
+    p["leaderboards"] = lb
+    st.markdown("---")
+    st.markdown("### Discoverability")
+    disc = p.get("discoverability", {"byCity": True, "byCompany": False})
+    disc["byCity"] = st.checkbox("Allow people in my city to find me", value=bool(disc.get("byCity", True)))
+    disc["byCompany"] = st.checkbox("Allow coworkers to find me", value=bool(disc.get("byCompany", False)))
+    p["discoverability"] = disc
+    st.markdown("---")
+    st.markdown("### Routes & Photos")
+    routes = p.get("routes", {"defaultShare": "private"})
+    routes["defaultShare"] = st.selectbox("Default route sharing", ["private","friends","team","public"], index=["private","friends","team","public"].index(routes.get("defaultShare","private")))
+    p["routes"] = routes
+    photos = p.get("photos", {"defaultAudience": "friends", "stripEXIF": True, "autoExpireDays": 365})
+    photos["defaultAudience"] = st.selectbox("Default photo audience", ["private","friends","team","public"], index=["private","friends","team","public"].index(photos.get("defaultAudience","friends")))
+    photos["stripEXIF"] = st.checkbox("Strip photo EXIF (location)", value=bool(photos.get("stripEXIF", True)))
+    photos["autoExpireDays"] = st.number_input("Auto-hide photos after (days)", min_value=0, max_value=3650, value=int(photos.get("autoExpireDays",365)))
+    p["photos"] = photos
+    st.markdown("---")
+    st.markdown("### Messaging & Security")
+    msg = p.get("messaging", {"allowRequests":"friends_of_friends","readReceipts": False,"blocked":[]})
+    msg["allowRequests"] = st.selectbox("Who can message you?", ["anyone","friends_of_friends","friends_only"], index=["anyone","friends_of_friends","friends_only"].index(msg.get("allowRequests","friends_of_friends")))
+    msg["readReceipts"] = st.checkbox("Send read receipts", value=bool(msg.get("readReceipts", False)))
+    blocked = msg.get("blocked", [])
+    block_user = st.text_input("Block user (enter username)")
+    if st.button("Block"):
+        if block_user and block_user not in blocked: blocked.append(block_user); st.success(f"Blocked {block_user}")
+    msg["blocked"] = blocked
+    p["messaging"] = msg
+    sec = p.get("security", {"appLock": False, "twoFA": False})
+    sec["appLock"] = st.checkbox("Enable app lock (passcode/biometric)", value=bool(sec.get("appLock", False)))
+    sec["twoFA"] = st.checkbox("Enable 2FA for sign-in", value=bool(sec.get("twoFA", False)))
+    p["security"] = sec
+    if st.button("Save Privacy Settings"):
+        u["privacy"] = p; st.success("Privacy settings saved."); st.balloons()
