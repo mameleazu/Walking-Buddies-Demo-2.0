@@ -296,7 +296,6 @@ def award_walk(uid, minutes, steps, miles, calories, is_group, shared_photo, moo
     if shared_photo:
         gained+=POINT_RULES["photo_share"]
         u["photos_this_week"]=int(u.get("photos_this_week",0))+1
-        # apply photo audience from user's privacy default
         audience = u.get("privacy",{}).get("photos",{}).get("defaultAudience","friends")
         st.session_state.photos.append({"user_id": uid, "miles": miles, "notes": "Shared a scenic photo", "ts": datetime.now().isoformat(timespec="seconds"), "audience": audience})
     s=calc_streak(u["walk_dates"])
@@ -317,7 +316,12 @@ def add_route(uid, name, distance_km, notes, audience):
     u = ensure_user(uid, uid); u["routes_completed_month"].add(name)
 
 def list_routes(uid): return [r for r in st.session_state.routes if r["user_id"] == uid]
-def delete_route(uid, name): st.session_state.routes = [r for r in st.session_state.routes if not (r{"{"}"user_id"{":"}==uid and r{"{"}"name"{":"}==name)]  # noqa
+
+def delete_route(uid, name):
+    st.session_state.routes = [
+        r for r in st.session_state.routes
+        if not (r["user_id"] == uid and r["name"] == name)
+    ]
 
 def send_message(sender_id, recipient_id, text):
     # Respect messaging privacy: block list + who can message
